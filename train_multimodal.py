@@ -1,8 +1,9 @@
 import os
-import glob
+import shutil
 import argparse
 import random
 import csv
+import time
 
 import numpy as np
 import pandas as pd
@@ -48,8 +49,8 @@ def load_annotations(path, tag_list):
 
 
 class SceneMultiModalDataset(Dataset):
-    def __init__(self, frame_dir, text_dir, scene_to_tags, tag_to_idx, tokenizer, max_len=512):
-        self.frame_dir = frame_dir
+    def __init__(self, embed_dir, text_dir, scene_to_tags, tag_to_idx, tokenizer, max_len=512):
+        self.embed_dir = embed_dir
         self.text_dir = text_dir
         self.scene_to_tags = scene_to_tags
         self.tag_to_idx = tag_to_idx
@@ -58,15 +59,11 @@ class SceneMultiModalDataset(Dataset):
         self.max_len = max_len
         self.num_tags = len(tag_to_idx)
 
-        self.scene_to_frames = {
-            sid: sorted(glob.glob(os.path.join(self.frame_dir, sid, "*.npy")))
-            for sid in self.scenes
-        }
-
-        self.scene_to_text = {
-            sid: open(os.path.join(self.text_dir, f"{sid}.txt"), encoding="utf-8").read()
-            for sid in self.scenes
-        }
+        self.scenes = [
+            sid for sid in self.scenes
+            if os.path.exists(os.path.join(embed_dir, f"{sid}.npy"))
+            and os.path.exists(os.path.join(text_dir, f"{sid}.txt"))
+        ]
 
     def __len__(self):
         return len(self.scenes)
@@ -74,16 +71,13 @@ class SceneMultiModalDataset(Dataset):
     def __getitem__(self, idx):
         sid = self.scenes[idx]
 
-        frame_files = self.scene_to_frames[sid]
-        if not frame_files:
-            raise RuntimeError(f"No frame embeddings for {sid}")
-
         frames = torch.tensor(
-            np.stack([np.load(f) for f in frame_files]),
+            np.load(os.path.join(self.embed_dir, f"{sid}.npy")),
             dtype=torch.float32
         )
 
-        text = self.scene_to_text[sid]
+        with open(os.path.join(self.text_dir, f"{sid}.txt"), encoding="utf-8") as f:
+            text = f.read()
 
         enc = self.tokenizer(
             text,
@@ -108,9 +102,18 @@ class SceneMultiModalDataset(Dataset):
 
 def collate_fn(batch):
     sids, frames, ids, masks, labels = zip(*batch)
+
+    max_len = max(f.shape[0] for f in frames)
+    dim = frames[0].shape[1]
+
+    padded = torch.zeros(len(frames), max_len, dim)
+
+    for i, f in enumerate(frames):
+        padded[i, :f.shape[0]] = f
+
     return (
         list(sids),
-        frames[0],
+        padded,
         torch.stack(ids),
         torch.stack(masks),
         torch.stack(labels),
@@ -124,9 +127,11 @@ class AttentionPooling(nn.Module):
         self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
 
     def forward(self, x):
-        x = x.unsqueeze(0)
-        pooled, _ = self.attn(self.query, x, x)
-        return pooled.squeeze(0).squeeze(0)
+        B = x.size(0)
+        query = self.query.expand(B, -1, -1)
+        pooled, _ = self.attn(query, x, x)
+
+        return pooled.squeeze(1)
 
 
 class MultiModalSceneClassifier(nn.Module):
@@ -147,7 +152,7 @@ class MultiModalSceneClassifier(nn.Module):
         )
 
     def forward(self, frames, input_ids, attention_mask):
-        v = self.frame_pool(frames).unsqueeze(0)
+        v = self.frame_pool(frames)
 
         t = self.text_encoder(
             input_ids=input_ids,
@@ -155,6 +160,7 @@ class MultiModalSceneClassifier(nn.Module):
         ).last_hidden_state[:, 0]
 
         fused = torch.cat([v, t], dim=-1)
+
         return self.head(fused)
 
 
@@ -180,8 +186,7 @@ def save_plot(metrics_path):
             precision_micro.append(float(row["val_precision_micro"]))
             recall_micro.append(float(row["val_recall_micro"]))
             f1_micro.append(float(row["val_f1_micro"]))
-            f1_macro.append(float(row["val_f1_macro"]))
-            accuracy.append(float(row["val_accuracy"]))
+            accuracy.append(float(row["val_hamming_acc"]))
 
     out_dir = os.path.dirname(metrics_path)
 
@@ -325,8 +330,10 @@ def train(args):
     val_loader = DataLoader(val_ds, batch_size=1, shuffle=False, collate_fn=collate_fn)
 
     sample_scene = train_ds.scenes[0]
-    sample_file = glob.glob(os.path.join(args.frames, sample_scene, "*.npy"))[0]
-    clip_dim = np.load(sample_file).shape[0]
+    sample_emb = np.load(os.path.join(args.frames, f"{sample_scene}.npy"))
+    clip_dim = sample_emb.shape[1]
+
+    print(f"CLIP shape: {sample_emb.shape}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -339,6 +346,7 @@ def train(args):
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
 
     os.makedirs(args.save_dir, exist_ok=True)
+    shutil.copy("train_multimodal.py", args.save_dir)
     metrics_path = os.path.join(args.save_dir, "metrics.csv")
 
     with open(metrics_path, "w", newline="") as f:
@@ -392,9 +400,8 @@ def train(args):
                 hamming_acc
             ])
 
-        save_plot(metrics_path)
-
         torch.save(model.state_dict(), os.path.join(args.save_dir, "epoch_latest.pt"))
+        save_plot(metrics_path)
 
         if val_loss < best:
             best = val_loss
@@ -408,6 +415,8 @@ def train(args):
 
             if early_stop_count == args.early_stop:
                     break
+        
+        time.sleep(10)
 
 
 if __name__ == "__main__":
