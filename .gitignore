@@ -1,4 +1,5 @@
 venv/
 results/
 extracted_data/
+segments/
 __pycache__/

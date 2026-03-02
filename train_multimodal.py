@@ -125,7 +125,7 @@ class VisualTransformer(nn.Module):
         super().__init__()
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
-        self.pos_emb = nn.Parameter(torch.randn(1, 2048, dim))  # max frames
+        self.pos_emb = nn.Parameter(torch.randn(1, 2048, dim))
 
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=dim,
@@ -154,9 +154,7 @@ class MultiModalSceneClassifier(nn.Module):
         super().__init__()
 
         self.frame_encoder = VisualTransformer(clip_dim)
-
         self.temperature = nn.Parameter(torch.ones(1))
-
         self.text_encoder = AutoModel.from_pretrained("distilbert-base-uncased")
         text_dim = self.text_encoder.config.hidden_size
 
