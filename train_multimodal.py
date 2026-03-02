@@ -120,25 +120,42 @@ def collate_fn(batch):
     )
 
 
-class AttentionPooling(nn.Module):
-    def __init__(self, dim, heads=4):
+class VisualTransformer(nn.Module):
+    def __init__(self, dim, depth=2, heads=8, dropout=0.1):
         super().__init__()
-        self.query = nn.Parameter(torch.randn(1, 1, dim))
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.pos_emb = nn.Parameter(torch.randn(1, 2048, dim))  # max frames
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=heads,
+            batch_first=True,
+            dropout=dropout
+        )
+
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x):
-        B = x.size(0)
-        query = self.query.expand(B, -1, -1)
-        pooled, _ = self.attn(query, x, x)
+        B, N, D = x.shape
 
-        return pooled.squeeze(1)
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)
+
+        x = x + self.pos_emb[:, :N+1]
+        x = self.encoder(x)
+
+        return self.norm(x[:, 0])
 
 
 class MultiModalSceneClassifier(nn.Module):
     def __init__(self, clip_dim, num_tags):
         super().__init__()
 
-        self.frame_pool = AttentionPooling(clip_dim)
+        self.frame_encoder = VisualTransformer(clip_dim)
+
+        self.temperature = nn.Parameter(torch.ones(1))
 
         self.text_encoder = AutoModel.from_pretrained("distilbert-base-uncased")
         text_dim = self.text_encoder.config.hidden_size
@@ -152,7 +169,7 @@ class MultiModalSceneClassifier(nn.Module):
         )
 
     def forward(self, frames, input_ids, attention_mask):
-        v = self.frame_pool(frames)
+        v = self.frame_encoder(frames)
 
         t = self.text_encoder(
             input_ids=input_ids,
@@ -160,8 +177,27 @@ class MultiModalSceneClassifier(nn.Module):
         ).last_hidden_state[:, 0]
 
         fused = torch.cat([v, t], dim=-1)
+        logits = self.head(fused)
+        return logits / self.temperature
 
-        return self.head(fused)
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, logits, targets):
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
+        )
+
+        probs = torch.sigmoid(logits)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+
+        loss = self.alpha * (1 - pt) ** self.gamma * bce
+
+        return loss.mean()
 
 
 def save_plot(metrics_path):
@@ -255,7 +291,7 @@ def validate(model, loader, device, criterion, idx_to_tag, save_dir, epoch):
             total_loss += loss.item()
 
             probs = torch.sigmoid(logits).cpu().numpy()
-            preds = (probs > 0.4).astype(int)
+            preds = (probs > 0.5).astype(int)
 
             all_true.append(labels.cpu().numpy())
             all_pred.append(preds)
@@ -265,7 +301,7 @@ def validate(model, loader, device, criterion, idx_to_tag, save_dir, epoch):
                 f.write("\tpredicted: ")
                 hits = [
                     (idx_to_tag[j], probs[i, j])
-                    for j in range(probs.shape[1]) if probs[i, j] > 0.4
+                    for j in range(probs.shape[1]) if probs[i, j] > 0.5
                 ]
                 if hits:
                     for t, p in sorted(hits, key=lambda x: x[1], reverse=True):
@@ -287,17 +323,13 @@ def validate(model, loader, device, criterion, idx_to_tag, save_dir, epoch):
     precision_micro = precision_score(
         all_true, all_pred, average="micro", zero_division=0
     )
-
     recall_micro = recall_score(
         all_true, all_pred, average="micro", zero_division=0
     )
-
     f1_micro = f1_score(
         all_true, all_pred, average="micro", zero_division=0
     )
-
     hamming_acc = 1.0 - hamming_loss(all_true, all_pred)
-
     val_loss = total_loss / len(loader)
 
     return val_loss, precision_micro, recall_micro, f1_micro, hamming_acc
@@ -343,6 +375,7 @@ def train(args):
         p.requires_grad = False
 
     criterion = nn.BCEWithLogitsLoss()
+    # criterion = FocalLoss(gamma=2.0, alpha=0.25)
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
 
     os.makedirs(args.save_dir, exist_ok=True)
