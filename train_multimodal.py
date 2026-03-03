@@ -121,7 +121,7 @@ def collate_fn(batch):
 
 
 class VisualTransformer(nn.Module):
-    def __init__(self, dim, depth=2, heads=8, dropout=0.1):
+    def __init__(self, dim, depth=2, heads=8, dropout=0.2):
         super().__init__()
 
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
@@ -207,7 +207,6 @@ def save_plot(metrics_path):
     precision_micro = []
     recall_micro = []
     f1_micro = []
-    f1_macro = []
     accuracy = []
 
     with open(metrics_path, "r") as f:
@@ -372,12 +371,13 @@ def train(args):
     for p in model.text_encoder.parameters():
         p.requires_grad = False
 
-    criterion = nn.BCEWithLogitsLoss()
-    # criterion = FocalLoss(gamma=2.0, alpha=0.25)
+    # criterion = nn.BCEWithLogitsLoss()
+    criterion = FocalLoss(gamma=2.0, alpha=0.25)
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
 
     os.makedirs(args.save_dir, exist_ok=True)
     shutil.copy("train_multimodal.py", args.save_dir)
+    shutil.copy("test_pipeline.py", args.save_dir)
     metrics_path = os.path.join(args.save_dir, "metrics.csv")
 
     with open(metrics_path, "w", newline="") as f:
