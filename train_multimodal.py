@@ -207,21 +207,36 @@ def save_plot(metrics_path):
     plt.close()
 
 
-def tune_thresholds(all_true, all_probs):
+def tune_thresholds(all_true, all_probs, min_support=5, min_precision=0.6, min_threshold=0.3, alpha=0.7):
     thresholds = []
 
     for i in range(all_true.shape[1]):
-        best_f1 = 0
+
+        y_true = all_true[:, i]
+        support = y_true.sum()
+
+        if support < min_support:
+            thresholds.append(0.5)
+            continue
+
+        best_score = 0
         best_t = 0.5
 
-        for t in np.linspace(0.05, 0.9, 40):
-            preds = (all_probs[:, i] > t).astype(int)
-            f1 = f1_score(all_true[:, i], preds, zero_division=0)
+        for t in np.linspace(0.1, 0.8, 30):
 
-            if f1 > best_f1:
-                best_f1 = f1
+            preds = (all_probs[:, i] > t).astype(int)
+            precision = precision_score(y_true, preds, zero_division=0)
+            if precision < min_precision:
+                continue
+
+            f1 = f1_score(y_true, preds, zero_division=0)
+
+            if f1 > best_score:
+                best_score = f1
                 best_t = t
 
+        best_t = max(best_t, min_threshold)
+        best_t = alpha * 0.5 + (1 - alpha) * best_t
         thresholds.append(best_t)
 
     return np.array(thresholds)
