@@ -17,10 +17,11 @@ from transformers import AutoTokenizer, AutoModel
 
 from train_multimodal import MultiModalSceneClassifier
 
-INPUT_FILE = "extracted_data/Napoleon.mkv"
-OUTPUT_DIR = "segments"
-MODEL_PATH = "results/vit_encoder/epoch_best.pt"
-TAGS_EXCEL = "data/label_selection.xlsx"
+INPUT_FILE  = "extracted_data/Napoleon.mkv"
+OUTPUT_DIR  = "segments"
+MODEL_PATH  = "results/vit_encoder/epoch_best.pt"
+TAGS_EXCEL  = "data/label_selection.xlsx"
+RESULTS_DIR = "results/pipeline"
 
 TARGET_SEGMENT_DURATION = 300
 SILENCE_THRESHOLD = "-30dB"
@@ -177,10 +178,9 @@ def test():
     model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
     model.eval()
 
-    results_dir = "results_pipeline"
-    os.makedirs(results_dir, exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    with open(os.path.join(results_dir, "annotations.txt"), "w", encoding="utf-8") as f:
+    with open(os.path.join(RESULTS_DIR, "annotations.txt"), "w", encoding="utf-8") as f:
         for sids, frames, ids, masks in tqdm(loader, desc="Classifying"):
             logits = model(frames.to(device), ids.to(device), masks.to(device))
             probs = torch.sigmoid(logits)[0].cpu().numpy()
