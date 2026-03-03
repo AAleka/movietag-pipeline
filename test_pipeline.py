@@ -175,17 +175,42 @@ def test(args):
 
     os.makedirs(args.results_dir, exist_ok=True)
 
+    if float(args.prediction_threshold) == 0:
+        model_dir = os.path.dirname(args.model)
+        thresholds_path = os.path.join(model_dir, "best_thresholds.npy")
+
+        if not os.path.exists(thresholds_path):
+            raise FileNotFoundError(
+                f"Auto threshold requested but not found: {thresholds_path}"
+            )
+
+        thresholds = np.load(thresholds_path)
+
+        if len(thresholds) != len(TAGS):
+            raise ValueError(
+                f"Threshold size mismatch: {len(thresholds)} vs {len(TAGS)} tags"
+            )
+
+        print("Using tuned per-tag thresholds.")
+    else:
+        thresholds = np.full(len(TAGS), float(args.prediction_threshold))
+        print(f"Using fixed threshold = {args.prediction_threshold}")
+
     tag_counts = defaultdict(int)
     tag_prob_sums = defaultdict(float)
     total_segments = 0
+
     with open(os.path.join(args.results_dir, "annotations.txt"), "w", encoding="utf-8") as f:
         for sids, frames, ids, masks in tqdm(loader, desc="Classifying"):
             logits = model(frames.to(device), ids.to(device), masks.to(device))
             probs = torch.sigmoid(logits)[0].cpu().numpy()
+
             preds = sorted(
-                [(idx_to_tag[i], p)
-                for i, p in enumerate(probs)
-                if p >= args.prediction_threshold],
+                [
+                    (idx_to_tag[i], p)
+                    for i, p in enumerate(probs)
+                    if p >= thresholds[i]
+                ],
                 key=lambda x: x[1],
                 reverse=True
             )
@@ -200,9 +225,9 @@ def test(args):
                 tag_counts[tag] += 1
                 tag_prob_sums[tag] += prob
 
-        f.write("\n" + "="*60 + "\n")
+        f.write("\n" + "=" * 60 + "\n")
         f.write("DOMINANT TAGS\n")
-        f.write("="*60 + "\n")
+        f.write("=" * 60 + "\n")
 
         dominant_tags = []
 
@@ -210,7 +235,6 @@ def test(args):
             count = tag_counts[tag]
             avg_prob = tag_prob_sums[tag] / count
             freq_ratio = count / total_segments
-
             dominance_score = freq_ratio * avg_prob
 
             dominant_tags.append(
@@ -219,7 +243,8 @@ def test(args):
 
         dominant_tags = [
             t for t in dominant_tags
-            if t[1] >= args.min_tag_occurrances and t[4] >= args.min_tag_score
+            if t[1] >= int(args.min_tag_occurrances)
+            and t[4] >= float(args.min_tag_score)
         ]
 
         dominant_tags.sort(key=lambda x: x[4], reverse=True)
@@ -252,7 +277,7 @@ if __name__ == "__main__":
     parser.add_argument("--results_dir", default="results/pipeline")
     parser.add_argument("--segment_duration", default=300)
     parser.add_argument("--silence_threshold", default="-30dB")
-    parser.add_argument("--prediction_threshold", default=0.5)
+    parser.add_argument("--prediction_threshold", default=0.5, help="0 for auto")
     parser.add_argument("--silence_min_duration", default=0.7)
     parser.add_argument("--frame_stride", default=10)
     parser.add_argument("--clip_batch_size", default=128)

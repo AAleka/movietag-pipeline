@@ -21,7 +21,7 @@ model, preprocess = clip.load(model_name, device=device)
 model.eval()
 
 DATA_DIR  = Path("extracted_data")
-INPUT_DIR = Path(f"{DATA_DIR}/movies")
+INPUT_DIR = Path(f"data/movies")
 AUDIO_DIR = Path(f"{DATA_DIR}/audios")
 TEXT_DIR  = Path(f"{DATA_DIR}/texts")
 EMBED_DIR = Path(f"{DATA_DIR}/embeddings")

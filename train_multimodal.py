@@ -207,17 +207,39 @@ def save_plot(metrics_path):
     plt.close()
 
 
+def tune_thresholds(all_true, all_probs):
+    thresholds = []
+
+    for i in range(all_true.shape[1]):
+        best_f1 = 0
+        best_t = 0.5
+
+        for t in np.linspace(0.05, 0.9, 40):
+            preds = (all_probs[:, i] > t).astype(int)
+            f1 = f1_score(all_true[:, i], preds, zero_division=0)
+
+            if f1 > best_f1:
+                best_f1 = f1
+                best_t = t
+
+        thresholds.append(best_t)
+
+    return np.array(thresholds)
+
+
 def validate(model, loader, device, criterion, idx_to_tag, save_dir, epoch):
     model.eval()
     os.makedirs(save_dir, exist_ok=True)
 
     out_path = os.path.join(save_dir, f"valid_{epoch}.txt")
 
-    all_true, all_pred = [], []
+    all_true, all_probs = [], []
     total_loss = 0.0
+    all_sids = []
 
-    with torch.no_grad(), open(out_path, "w", encoding="utf-8") as f:
+    with torch.no_grad():
         pbar = tqdm(loader, desc=f"Valid {epoch}", ncols=100)
+
         for num, (sids, frames, ids, masks, labels) in enumerate(pbar):
             frames = frames.to(device)
             ids = ids.to(device)
@@ -229,34 +251,18 @@ def validate(model, loader, device, criterion, idx_to_tag, save_dir, epoch):
             total_loss += loss.item()
 
             probs = torch.sigmoid(logits).cpu().numpy()
-            preds = (probs > 0.5).astype(int)
 
             all_true.append(labels.cpu().numpy())
-            all_pred.append(preds)
-
-            for i, sid in enumerate(sids):
-                f.write(f"https://www.youtube.com/watch?v={sid}\n")
-                f.write("\tpredicted: ")
-                hits = [
-                    (idx_to_tag[j], probs[i, j])
-                    for j in range(probs.shape[1]) if probs[i, j] > 0.5
-                ]
-                if hits:
-                    for t, p in sorted(hits, key=lambda x: x[1], reverse=True):
-                        f.write(f"{t} ({p:.3f}) ")
-                else:
-                    f.write("No label")
-
-                f.write("\n\tannotated: ")
-                for j, v in enumerate(labels[i]):
-                    if v == 1:
-                        f.write(idx_to_tag[j] + " ")
-                f.write("\n\n")
+            all_probs.append(probs)
+            all_sids.extend(sids)
 
             pbar.set_postfix({"valid_loss": total_loss / (num + 1)})
 
     all_true = np.vstack(all_true)
-    all_pred = np.vstack(all_pred)
+    all_probs = np.vstack(all_probs)
+
+    thresholds = tune_thresholds(all_true, all_probs)
+    all_pred = (all_probs > thresholds).astype(int)
 
     precision_micro = precision_score(
         all_true, all_pred, average="micro", zero_division=0
@@ -268,9 +274,35 @@ def validate(model, loader, device, criterion, idx_to_tag, save_dir, epoch):
         all_true, all_pred, average="micro", zero_division=0
     )
     hamming_acc = 1.0 - hamming_loss(all_true, all_pred)
+
     val_loss = total_loss / len(loader)
 
-    return val_loss, precision_micro, recall_micro, f1_micro, hamming_acc
+    with open(out_path, "w", encoding="utf-8") as f:
+        for i, sid in enumerate(all_sids):
+
+            f.write(f"https://www.youtube.com/watch?v={sid}\n")
+            f.write("\tpredicted: ")
+
+            hits = [
+                (idx_to_tag[j], all_probs[i, j])
+                for j in range(all_probs.shape[1])
+                if all_probs[i, j] > thresholds[j]
+            ]
+
+            if hits:
+                for t, p in sorted(hits, key=lambda x: x[1], reverse=True):
+                    f.write(f"{t} ({p:.3f}) ")
+            else:
+                f.write("No label")
+
+            f.write("\n\tannotated: ")
+            for j, v in enumerate(all_true[i]):
+                if v == 1:
+                    f.write(idx_to_tag[j] + " ")
+
+            f.write("\n\n")
+
+    return val_loss, precision_micro, recall_micro, f1_micro, hamming_acc, thresholds
 
 
 def train(args):
@@ -356,7 +388,7 @@ def train(args):
 
             pbar.set_postfix({"train_loss": loss_sum / (num + 1), "ES counter": early_stop_count})
 
-        val_loss, precision_micro, recall_micro, f1_micro, hamming_acc = validate(
+        val_loss, precision_micro, recall_micro, f1_micro, hamming_acc, thresholds = validate(
             model, val_loader, device, criterion, idx_to_tag, args.save_dir, epoch
         )
 
@@ -377,18 +409,22 @@ def train(args):
 
         if val_loss < best:
             best = val_loss
-            torch.save(model.state_dict(), os.path.join(args.save_dir, "epoch_best.pt"))
+
+            torch.save(model.state_dict(),
+                    os.path.join(args.save_dir, "epoch_best.pt"))
+
+            np.save(os.path.join(args.save_dir, "best_thresholds.npy"),
+                    thresholds)
 
             if args.early_stop != 0:
                 early_stop_count = 0
 
         elif args.early_stop != 0:
             early_stop_count += 1
-
             if early_stop_count == args.early_stop:
-                    break
+                break
         
-        time.sleep(10)
+        time.sleep(5)
 
 
 if __name__ == "__main__":
