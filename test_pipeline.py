@@ -8,7 +8,6 @@ import argparse
 import numpy as np
 import cv2 as cv
 import pandas as pd
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from tqdm import tqdm
@@ -16,7 +15,7 @@ from glob import glob
 from collections import defaultdict
 from transformers import AutoTokenizer
 
-from train_multimodal import MultiModalSceneClassifier
+from model import MultiModalSceneClassifier
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 

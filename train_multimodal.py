@@ -4,48 +4,17 @@ import argparse
 import random
 import csv
 import time
-
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 from sklearn.metrics import precision_score, recall_score, f1_score, hamming_loss
-import matplotlib.pyplot as plt
+from transformers import AutoTokenizer
 
-from transformers import AutoTokenizer, AutoModel
-
-
-def split_train_val(scene_to_tags, val_fraction=0.1, seed=42):
-    random.seed(seed)
-    scene_ids = list(scene_to_tags.keys())
-    random.shuffle(scene_ids)
-
-    n_val = int(len(scene_ids) * val_fraction)
-    val_ids = set(scene_ids[:n_val])
-    train_ids = set(scene_ids[n_val:])
-
-    return (
-        {k: scene_to_tags[k] for k in train_ids},
-        {k: scene_to_tags[k] for k in val_ids},
-    )
-
-
-def load_annotations(path, tag_list):
-    scene_to_tags = {}
-    tag_to_idx = {t: i for i, t in enumerate(tag_list)}
-    idx_to_tag = {i: t for t, i in tag_to_idx.items()}
-
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if ":" not in line:
-                continue
-            sid, tags = line.split(":")
-            tags = [t.strip() for t in tags.split(",") if t.strip() in tag_to_idx]
-            scene_to_tags[sid.strip()] = tags
-
-    return scene_to_tags, tag_to_idx, idx_to_tag
+from model import MultiModalSceneClassifier
 
 
 class SceneMultiModalDataset(Dataset):
@@ -100,6 +69,25 @@ class SceneMultiModalDataset(Dataset):
         )
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, logits, targets):
+        bce = torch.nn.functional.binary_cross_entropy_with_logits(
+            logits, targets, reduction="none"
+        )
+
+        probs = torch.sigmoid(logits)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+
+        loss = self.alpha * (1 - pt) ** self.gamma * bce
+
+        return loss.mean()
+
+
 def collate_fn(batch):
     sids, frames, ids, masks, labels = zip(*batch)
 
@@ -120,104 +108,35 @@ def collate_fn(batch):
     )
 
 
-class VisualTransformer(nn.Module):
-    def __init__(self, dim, depth=2, heads=8, dropout=0.2):
-        super().__init__()
+def split_train_val(scene_to_tags, val_fraction=0.1, seed=42):
+    random.seed(seed)
+    scene_ids = list(scene_to_tags.keys())
+    random.shuffle(scene_ids)
 
-        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
-        self.pos_emb = nn.Parameter(torch.randn(1, 2048, dim))
+    n_val = int(len(scene_ids) * val_fraction)
+    val_ids = set(scene_ids[:n_val])
+    train_ids = set(scene_ids[n_val:])
 
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=dim,
-            nhead=heads,
-            batch_first=True,
-            dropout=dropout
-        )
-
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=depth)
-        self.norm = nn.LayerNorm(dim)
-
-    def forward(self, x):
-        B, N, D = x.shape
-
-        cls = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls, x], dim=1)
-
-        x = x + self.pos_emb[:, :N+1]
-        x = self.encoder(x)
-
-        x = self.norm(x)
-        return x
+    return (
+        {k: scene_to_tags[k] for k in train_ids},
+        {k: scene_to_tags[k] for k in val_ids},
+    )
 
 
-class MultiModalSceneClassifier(nn.Module):
-    def __init__(self, clip_dim, num_tags):
-        super().__init__()
-        
-        self.frame_encoder = VisualTransformer(clip_dim)
-        self.text_encoder = AutoModel.from_pretrained(
-            "distilbert-base-uncased"
-        )
-        text_dim = self.text_encoder.config.hidden_size
-        self.text_proj = nn.Linear(text_dim, clip_dim)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=clip_dim,
-            num_heads=8,
-            batch_first=True
-        )
+def load_annotations(path, tag_list):
+    scene_to_tags = {}
+    tag_to_idx = {t: i for i, t in enumerate(tag_list)}
+    idx_to_tag = {i: t for t, i in tag_to_idx.items()}
 
-        self.norm = nn.LayerNorm(clip_dim)
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            if ":" not in line:
+                continue
+            sid, tags = line.split(":")
+            tags = [t.strip() for t in tags.split(",") if t.strip() in tag_to_idx]
+            scene_to_tags[sid.strip()] = tags
 
-        self.head = nn.Sequential(
-            nn.Linear(clip_dim, 512),
-            nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, num_tags),
-        )
-
-        self.temperature = nn.Parameter(torch.ones(1))
-
-    def forward(self, frames, input_ids, attention_mask):
-        v_tokens = self.frame_encoder(frames)
-
-        text_out = self.text_encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask
-        )
-
-        t_cls = text_out.last_hidden_state[:, 0]
-        t_cls = self.text_proj(t_cls).unsqueeze(1)
-
-        fused, _ = self.cross_attn(
-            query=t_cls,
-            key=v_tokens,
-            value=v_tokens
-        )
-
-        fused = self.norm(fused.squeeze(1))
-
-        logits = self.head(fused)
-
-        return logits / self.temperature
-
-
-class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.25):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-
-    def forward(self, logits, targets):
-        bce = torch.nn.functional.binary_cross_entropy_with_logits(
-            logits, targets, reduction="none"
-        )
-
-        probs = torch.sigmoid(logits)
-        pt = torch.where(targets == 1, probs, 1 - probs)
-
-        loss = self.alpha * (1 - pt) ** self.gamma * bce
-
-        return loss.mean()
+    return scene_to_tags, tag_to_idx, idx_to_tag
 
 
 def save_plot(metrics_path):
