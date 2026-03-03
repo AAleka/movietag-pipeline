@@ -146,36 +146,58 @@ class VisualTransformer(nn.Module):
         x = x + self.pos_emb[:, :N+1]
         x = self.encoder(x)
 
-        return self.norm(x[:, 0])
+        x = self.norm(x)
+        return x
 
 
 class MultiModalSceneClassifier(nn.Module):
     def __init__(self, clip_dim, num_tags):
         super().__init__()
-
+        
         self.frame_encoder = VisualTransformer(clip_dim)
-        self.temperature = nn.Parameter(torch.ones(1))
-        self.text_encoder = AutoModel.from_pretrained("distilbert-base-uncased")
+        self.text_encoder = AutoModel.from_pretrained(
+            "distilbert-base-uncased"
+        )
         text_dim = self.text_encoder.config.hidden_size
+        self.text_proj = nn.Linear(text_dim, clip_dim)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=clip_dim,
+            num_heads=8,
+            batch_first=True
+        )
+
+        self.norm = nn.LayerNorm(clip_dim)
 
         self.head = nn.Sequential(
-            nn.LayerNorm(clip_dim + text_dim),
-            nn.Linear(clip_dim + text_dim, 512),
+            nn.Linear(clip_dim, 512),
             nn.GELU(),
             nn.Dropout(0.3),
             nn.Linear(512, num_tags),
         )
 
-    def forward(self, frames, input_ids, attention_mask):
-        v = self.frame_encoder(frames)
+        self.temperature = nn.Parameter(torch.ones(1))
 
-        t = self.text_encoder(
+    def forward(self, frames, input_ids, attention_mask):
+        v_tokens = self.frame_encoder(frames)
+
+        text_out = self.text_encoder(
             input_ids=input_ids,
             attention_mask=attention_mask
-        ).last_hidden_state[:, 0]
+        )
 
-        fused = torch.cat([v, t], dim=-1)
+        t_cls = text_out.last_hidden_state[:, 0]
+        t_cls = self.text_proj(t_cls).unsqueeze(1)
+
+        fused, _ = self.cross_attn(
+            query=t_cls,
+            key=v_tokens,
+            value=v_tokens
+        )
+
+        fused = self.norm(fused.squeeze(1))
+
         logits = self.head(fused)
+
         return logits / self.temperature
 
 
