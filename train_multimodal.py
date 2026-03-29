@@ -425,11 +425,8 @@ def train(args):
         if val_loss < best:
             best = val_loss
 
-            torch.save(model.state_dict(),
-                    os.path.join(args.save_dir, "epoch_best.pt"))
-
-            np.save(os.path.join(args.save_dir, "best_thresholds.npy"),
-                    thresholds)
+            torch.save(model.state_dict(), os.path.join(args.save_dir, "epoch_best.pt"))
+            np.save(os.path.join(args.save_dir, "best_thresholds.npy"), thresholds)
 
             if args.early_stop != 0:
                 early_stop_count = 0
@@ -448,7 +445,7 @@ if __name__ == "__main__":
     parser.add_argument("--texts", default="./extracted_data/texts")
     parser.add_argument("--annotations", default="./data/annotations.txt")
     parser.add_argument("--tags", default="./data/label_selection.xlsx")
-    parser.add_argument("--save_dir", required=True)
+    parser.add_argument("--save-dir", required=True)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--early_stop", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-5)

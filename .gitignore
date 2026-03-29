@@ -1,3 +1,4 @@
+.venv/
 venv/
 results/
 extracted_data/

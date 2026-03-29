@@ -84,25 +84,114 @@ def detect_silences(file):
     return starts
 
 
+def get_best_streams(input_file, debug=True):
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_streams",
+        "-of", "json",
+        input_file
+    ]
+    out, _ = run(cmd)
+    data = json.loads(out)
+
+    best_audio = None
+    best_audio_channels = -1
+
+    eng_sub = None
+    eng_sdh_sub = None
+
+    if debug:
+        print("\n=== STREAM INSPECTION ===")
+
+    for s in data["streams"]:
+        idx = s["index"]
+        codec_type = s.get("codec_type")
+        tags = s.get("tags", {})
+        lang = tags.get("language", "unknown")
+        title = tags.get("title", "")
+        channels = s.get("channels", "-")
+
+        if debug:
+            print(
+                f"[{idx}] {codec_type.upper()} | "
+                f"lang={lang} | "
+                f"channels={channels} | "
+                f"title='{title}'"
+            )
+
+        if codec_type == "audio" and lang == "eng":
+            if channels > best_audio_channels:
+                best_audio = idx
+                best_audio_channels = channels
+
+        if codec_type == "subtitle" and lang == "eng":
+            if eng_sub is None:
+                eng_sub = idx
+
+            if "sdh" in title.lower() or "hearing" in title.lower():
+                eng_sdh_sub = idx
+
+    best_sub = eng_sdh_sub if eng_sdh_sub is not None else eng_sub
+
+    if debug:
+        print("\n=== SELECTED STREAMS ===")
+        print(f"Audio stream: {best_audio}")
+        print(f"Subtitle stream: {best_sub}")
+        print("========================\n")
+
+    return best_audio, best_sub
+
+
 def split_video(input_file, segments):
     Path(args.output_dir).mkdir(exist_ok=True)
+
+    audio_idx, sub_idx = get_best_streams(input_file)
+
+    if audio_idx is None:
+        print("WARNING: No English audio found")
+    if sub_idx is None:
+        print("WARNING: No English subtitles found")
+
     for i, (start, end) in enumerate(tqdm(segments, desc="Splitting Video")):
         duration = end - start
         output_video = f"{args.output_dir}/segment_{i:03d}.mkv"
         output_sub = f"{args.output_dir}/segment_{i:03d}.srt"
 
         if not os.path.exists(output_video):
-            run(["ffmpeg", "-ss", str(start), "-i", input_file, "-t", str(duration), "-c", "copy", output_video, "-y"])
-        
-        if not os.path.exists(output_sub):
-            run(["ffmpeg", "-ss", str(start), "-i", input_file, "-t", str(duration), "-map", "0:s:0", output_sub, "-y"])
+            cmd = [
+                "ffmpeg", "-ss", str(start), "-i", input_file,
+                "-t", str(duration),
+                "-map", "0:v:0"
+            ]
+
+            if audio_idx is not None:
+                cmd += ["-map", f"0:{audio_idx}"]
+
+            cmd += ["-c", "copy", output_video, "-y"]
+
+            run(cmd)
+
+        if sub_idx is not None and not os.path.exists(output_sub):
+            run([
+                "ffmpeg", "-ss", str(start), "-i", input_file,
+                "-t", str(duration),
+                "-map", f"0:{sub_idx}",
+                output_sub, "-y"
+            ])
 
         if os.path.exists(output_sub):
             with open(output_sub, "r", encoding="utf-8") as f:
                 content = f.read()
-            content = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}', '', content)
+
+            content = re.sub(r'\d+\n\d{2}:\d{2}:\d{2},\d{3} --> .*', '', content)
             content = re.sub(r'<[^>]*>', '', content)
-            clean_text = " ".join([line.strip() for line in content.splitlines() if line.strip() and not line.strip().isdigit()])
+
+            clean_text = " ".join([
+                line.strip()
+                for line in content.splitlines()
+                if line.strip() and not line.strip().isdigit()
+            ])
+
             with open(output_sub.replace(".srt", ".txt"), "w", encoding="utf-8") as f:
                 f.write(clean_text)
 
@@ -270,19 +359,19 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_file", type=str, required=True)
-    parser.add_argument("--output_dir", default="segments")
+    parser.add_argument("--input-file", type=str, required=True)
+    parser.add_argument("--output-dir", default="segments")
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--tags", default="data/label_selection.xlsx")
-    parser.add_argument("--results_dir", default="results/pipeline")
-    parser.add_argument("--segment_duration", default=300)
-    parser.add_argument("--silence_threshold", default="-30dB")
-    parser.add_argument("--prediction_threshold", default=0.5, help="0 for auto")
-    parser.add_argument("--silence_min_duration", default=0.7)
+    parser.add_argument("--results-dir", default="results/pipeline")
+    parser.add_argument("--segment-duration", default=300)
+    parser.add_argument("--silence-threshold", default="-30dB")
+    parser.add_argument("--prediction-threshold", default=0.5, help="0 for auto")
+    parser.add_argument("--silence-min-duration", default=0.7)
     parser.add_argument("--frame_stride", default=10)
-    parser.add_argument("--clip_batch_size", default=128)
-    parser.add_argument("--min_tag_occurrances", default=2)
-    parser.add_argument("--min_tag_score", default=0.05)
+    parser.add_argument("--clip-batch-size", default=128)
+    parser.add_argument("--min-tag-occurrances", default=2)
+    parser.add_argument("--min-tag-score", default=0.05)
 
     args = parser.parse_args()
     main(args)
