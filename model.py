@@ -69,17 +69,11 @@ class MultiModalSceneClassifier(nn.Module):
             attention_mask=attention_mask
         )
 
-        t_cls = text_out.last_hidden_state[:, 0]
-        t_cls = self.text_proj(t_cls).unsqueeze(1)
+        t_tokens = text_out.last_hidden_state 
+        t_tokens = self.text_proj(t_tokens)
 
-        fused, _ = self.cross_attn(
-            query=t_cls,
-            key=v_tokens,
-            value=v_tokens
-        )
-
-        fused = self.norm(fused.squeeze(1))
-
+        fused, _ = self.cross_attn(query=t_tokens, key=v_tokens, value=v_tokens)
+        fused = fused.mean(dim=1)
         logits = self.head(fused)
 
         return logits / self.temperature
